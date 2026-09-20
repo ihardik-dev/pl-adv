@@ -1,74 +1,78 @@
 import pandas as pd
-from src.features import create_match_features
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import classification_report
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    log_loss,
+)
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
+from src.features import build_features
 
+USE_ODDS = False   # set True to add Bet365 implied probabilities
+LABELS = ["H", "D", "A"]
+
+# ---------------------------------------------------------------- data
 df = pd.read_csv("data/processed/matches.csv")
 df["Date"] = pd.to_datetime(df["Date"])
 
-features = []
+features_df = build_features(df, use_odds=USE_ODDS)
+features_df.to_csv("data/processed/features.csv", index=False)
 
-for _, row in df.iterrows():
-    result = create_match_features(row, df)
+train = features_df[features_df["Season"] != "2025/26"]
+test = features_df[features_df["Season"] == "2025/26"]
 
-    if result is not None:
-        features.append(result)
-
-features_df = pd.DataFrame(features)
-
-features_df.to_csv(
-    "data/processed/features.csv",
-    index=False
-)
-
-features_df = pd.read_csv("data/processed/features.csv")
-features_df["Date"] = pd.to_datetime(features_df["Date"])
-
-train = features_df[
-    features_df["Season"] != "2025/26"
-]
-
-# Test data
-test = features_df[
-    features_df["Season"] == "2025/26"
-]
-
-# Features used by the model
 feature_columns = [
-    "Home_Form",
-    "Away_Form"
+    "Elo_Diff",
+    "Form5_Diff",
+    "Form10_Diff",
+    "GD10_Diff",
+    "SoT10_Diff",
+    "Venue_Form_Diff",
 ]
+if USE_ODDS:
+    feature_columns += ["Odds_H", "Odds_D", "Odds_A"]
 
-X_train = train[feature_columns]
-X_test = test[feature_columns]
+X_train, y_train = train[feature_columns], train["Target"]
+X_test, y_test = test[feature_columns], test["Target"]
 
-y_train = train["Target"]
-y_test = test["Target"]
+print(f"Train matches: {len(train)}  |  Test matches: {len(test)}")
 
-model = LogisticRegression(max_iter=1000)
+# ---------------------------------------------------------------- baseline
+home_rate = (y_test == "H").mean()
+print(f"\nBaseline (always predict Home): {home_rate:.3f}")
 
-model.fit(X_train, y_train)
+# ---------------------------------------------------------------- models
+models = {
+    "LogisticRegression": make_pipeline(
+        StandardScaler(), LogisticRegression(max_iter=1000)
+    ),
+    "HistGradientBoosting": HistGradientBoostingClassifier(
+        max_depth=3, learning_rate=0.05, max_iter=150, random_state=42
+    ),
+}
 
-y_pred = model.predict(X_test)
+for name, model in models.items():
+    model.fit(X_train, y_train)
 
-accuracy = accuracy_score(y_test, y_pred)
+    y_pred = model.predict(X_test)
+    proba = model.predict_proba(X_test)
 
-cm = confusion_matrix(
-    y_test,
-    y_pred,
-    labels=["H", "D", "A"]
-)
+    acc = accuracy_score(y_test, y_pred)
+    ll = log_loss(y_test, proba, labels=model.classes_)
 
-print("\nClassification Report:")
-print(
-    classification_report(
-        y_test,
-        y_pred,
-        labels=["H", "D", "A"],
-        zero_division=0
+    print(f"\n===== {name} =====")
+    print(f"Accuracy: {acc:.3f}   Log loss: {ll:.3f}")
+
+    print("\nConfusion matrix (rows = actual, cols = predicted; H, D, A):")
+    print(confusion_matrix(y_test, y_pred, labels=LABELS))
+
+    print("\nClassification report:")
+    print(
+        classification_report(
+            y_test, y_pred, labels=LABELS, zero_division=0
+        )
     )
-)
-
